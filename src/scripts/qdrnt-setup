@@ -1,0 +1,77 @@
+#!/bin/bash
+# qdrnt post-install setup. Runs inside the installed system (chroot).
+# Usage: qdrnt-setup <username>
+set -u
+
+user="$1"
+
+log() { echo "[qdrnt-setup] $*"; }
+
+has_pkg() { pacman -Qq "$1" &>/dev/null; }
+
+has_nvidia_gpu() {
+    # Display controllers (PCI class 0x03xxxx) from vendor NVIDIA (0x10de)
+    local dev
+    for dev in /sys/bus/pci/devices/*; do
+        [[ -r "$dev/vendor" && -r "$dev/class" ]] || continue
+        if [[ "$(<"$dev/vendor")" == "0x10de" && "$(<"$dev/class")" == 0x03* ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# --- Docker: enable the socket and make sure the user is in the group ------
+if has_pkg docker; then
+    log "enabling docker"
+    systemctl enable docker.socket
+    getent group docker >/dev/null || groupadd --system docker
+    usermod -aG docker "$user"
+fi
+
+# --- NVIDIA: CUDA (+ GPU support in Docker) --------------------------------
+if has_nvidia_gpu; then
+    log "NVIDIA GPU detected, installing CUDA"
+    cuda_pkgs=(cuda)
+    has_pkg docker && cuda_pkgs+=(nvidia-container-toolkit)
+    if pacman -S --noconfirm --needed "${cuda_pkgs[@]}"; then
+        if has_pkg nvidia-container-toolkit; then
+            nvidia-ctk runtime configure --runtime=docker || log "nvidia-ctk configure failed"
+        fi
+    else
+        log "CUDA installation failed, continuing"
+    fi
+else
+    log "no NVIDIA GPU, skipping CUDA"
+fi
+
+# --- Flatpak: add Flathub system-wide --------------------------------------
+if has_pkg flatpak; then
+    log "adding flathub"
+    flatpak remote-add --system --if-not-exists flathub \
+        https://dl.flathub.org/repo/flathub.flatpakrepo || log "flathub remote failed"
+fi
+
+# --- Helium as the default browser ------------------------------------------
+if has_pkg helium-browser-bin; then
+    log "setting helium as default browser"
+    mkdir -p /etc/xdg
+    cat > /etc/xdg/mimeapps.list <<'EOF'
+[Default Applications]
+x-scheme-handler/http=helium.desktop
+x-scheme-handler/https=helium.desktop
+x-scheme-handler/about=helium.desktop
+x-scheme-handler/unknown=helium.desktop
+text/html=helium.desktop
+application/xhtml+xml=helium.desktop
+EOF
+    mkdir -p /etc/environment.d
+    echo "BROWSER=helium-browser" > /etc/environment.d/90-qdrnt-browser.conf
+fi
+
+# --- zsh for users created later --------------------------------------------
+if [[ -x /bin/zsh ]]; then
+    sed -i 's|^SHELL=.*|SHELL=/bin/zsh|' /etc/default/useradd
+fi
+
+exit 0
