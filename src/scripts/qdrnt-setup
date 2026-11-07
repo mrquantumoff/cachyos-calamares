@@ -21,6 +21,13 @@ has_nvidia_gpu() {
     return 1
 }
 
+# --- multilib: make sure it stays enabled (Steam, lib32-mangohud, ...) -------
+if grep -q '^#\[multilib\]' /etc/pacman.conf; then
+    log "enabling multilib"
+    sed -i '/^#\[multilib\]$/{s/^#//;n;s/^#Include/Include/}' /etc/pacman.conf
+    pacman -Sy --noconfirm || log "pacman -Sy failed"
+fi
+
 # --- Docker: enable the socket and make sure the user is in the group ------
 if has_pkg docker; then
     log "enabling docker"
