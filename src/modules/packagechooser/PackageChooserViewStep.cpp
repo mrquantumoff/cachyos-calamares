@@ -114,7 +114,20 @@ PackageChooserViewStep::onActivate()
 {
     if ( !m_widget->hasSelection() )
     {
-        m_widget->setSelection( m_config->defaultSelectionIndex() );
+        const auto mode = m_config->mode();
+        const auto defaults = m_config->defaultSelectionIndexes();
+        if ( ( mode == PackageChooserMode::OptionalMultiple || mode == PackageChooserMode::RequiredMultiple )
+             && defaults.count() > 1 )
+        {
+            for ( const auto& index : defaults )
+            {
+                m_widget->setSelection( index );
+            }
+        }
+        else
+        {
+            m_widget->setSelection( m_config->defaultSelectionIndex() );
+        }
     }
 }
 

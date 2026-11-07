@@ -243,6 +243,18 @@
     - docker-compose
     - docker-buildx
     - distrobox
+- name: "qdrnt virtualization"
+  description: "QEMU/KVM with libvirt and virt-manager (enabled, user added to the libvirt group)"
+  hidden: false
+  selected: true
+  critical: true
+  packages:
+    - libvirt
+    - qemu-desktop
+    - virt-manager
+    - dnsmasq
+    - edk2-ovmf
+    - swtpm
 - name: "qdrnt gaming"
   description: "CachyOS gaming stack, Epic Games launcher, ProtonPlus, MangoHud and GOverlay"
   hidden: false

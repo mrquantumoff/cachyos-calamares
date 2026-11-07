@@ -9,5 +9,11 @@ if pacman -Qs ufw &>/dev/null; then
   if pacman -Qq kdeconnect > /dev/null ; then
     ufw allow "KDE Connect"
   fi
+  if pacman -Qq libvirt > /dev/null 2>&1 ; then
+    # DHCP/DNS from dnsmasq and routed NAT traffic for libvirt's default network
+    ufw allow in on virbr0
+    ufw route allow in on virbr0
+    ufw route allow out on virbr0
+  fi
 
 fi

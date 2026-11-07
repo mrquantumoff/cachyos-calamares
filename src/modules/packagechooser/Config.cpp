@@ -351,19 +351,21 @@ Config::setConfigurationMap( const QVariantMap& configurationMap )
     {
         fillModel( m_model, configurationMap.value( "items" ).toList() );
 
-        QString default_item_id = Calamares::getString( configurationMap, "default" );
-        if ( !default_item_id.isEmpty() )
+        // `default` is a single id, or (for the *multiple modes) a list of ids.
+        const QStringList default_item_ids = configurationMap.value( "default" ).toStringList();
+        m_defaultModelIndexes.clear();
+        for ( int item_n = 0; item_n < m_model->packageCount(); ++item_n )
         {
-            for ( int item_n = 0; item_n < m_model->packageCount(); ++item_n )
-            {
-                QModelIndex item_idx = m_model->index( item_n, 0 );
-                QVariant item_id = m_model->data( item_idx, PackageListModel::IdRole );
+            QModelIndex item_idx = m_model->index( item_n, 0 );
+            QVariant item_id = m_model->data( item_idx, PackageListModel::IdRole );
 
-                if ( item_id.toString() == default_item_id )
+            if ( default_item_ids.contains( item_id.toString() ) )
+            {
+                if ( !m_defaultModelIndex.isValid() )
                 {
                     m_defaultModelIndex = item_idx;
-                    break;
                 }
+                m_defaultModelIndexes.append( item_idx );
             }
         }
     }

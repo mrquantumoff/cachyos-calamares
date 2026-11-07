@@ -41,7 +41,8 @@ PackageChooserPage::PackageChooserPage( PackageChooserMode mode, QWidget* parent
     case PackageChooserMode::OptionalMultiple:
         [[fallthrough]];
     case PackageChooserMode::RequiredMultiple:
-        ui->products->setSelectionMode( QAbstractItemView::ExtendedSelection );
+        // A click toggles an item (no Ctrl/Shift needed), like a checklist.
+        ui->products->setSelectionMode( QAbstractItemView::MultiSelection );
     }
 
     ui->products->setMinimumWidth( 10 * Calamares::defaultFontHeight() );

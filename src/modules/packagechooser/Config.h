@@ -72,6 +72,8 @@ public:
     PackageChooserMode mode() const { return m_mode; }
     PackageListModel* model() const { return m_model; }
     QModelIndex defaultSelectionIndex() const { return m_defaultModelIndex; }
+    /// All default items (`default` may be a list for the *multiple modes)
+    QModelIndexList defaultSelectionIndexes() const { return m_defaultModelIndexes; }
 
     /** @brief Returns an "introductory package" which describes packagechooser
      *
@@ -108,6 +110,7 @@ signals:
 private:
     PackageListModel* m_model = nullptr;
     QModelIndex m_defaultModelIndex;
+    QModelIndexList m_defaultModelIndexes;
 
     /// Selection mode for this module
     PackageChooserMode m_mode = PackageChooserMode::Optional;

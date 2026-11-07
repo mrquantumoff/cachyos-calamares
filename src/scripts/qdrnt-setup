@@ -1,9 +1,10 @@
 #!/bin/bash
 # qdrnt post-install setup. Runs inside the installed system (chroot).
-# Usage: qdrnt-setup <username>
+# Usage: qdrnt-setup <username> [comma-separated oh-my-zsh plugins]
 set -u
 
 user="$1"
+zsh_plugins_csv="${2:-}"
 
 log() { echo "[qdrnt-setup] $*"; }
 
@@ -34,6 +35,22 @@ if has_pkg docker; then
     systemctl enable docker.socket
     getent group docker >/dev/null || groupadd --system docker
     usermod -aG docker "$user"
+fi
+
+# --- libvirt: enable the daemon, default NAT network, user in libvirt group --
+if has_pkg libvirt; then
+    log "enabling libvirt"
+    systemctl enable libvirtd.socket
+    getent group libvirt >/dev/null || groupadd --system libvirt
+    usermod -aG libvirt,kvm "$user"
+    # Equivalent of `virsh net-autostart default` (libvirtd isn't running in the chroot)
+    if [[ -f /etc/libvirt/qemu/networks/default.xml ]]; then
+        mkdir -p /etc/libvirt/qemu/networks/autostart
+        ln -sf ../default.xml /etc/libvirt/qemu/networks/autostart/default.xml
+    fi
+    # Let virt-manager use the system connection by default
+    mkdir -p /etc/profile.d
+    echo 'export LIBVIRT_DEFAULT_URI="qemu:///system"' > /etc/profile.d/qdrnt-libvirt.sh
 fi
 
 # --- NVIDIA: CUDA (+ GPU support in Docker) --------------------------------
@@ -76,9 +93,42 @@ EOF
     echo "BROWSER=helium-browser" > /etc/environment.d/90-qdrnt-browser.conf
 fi
 
-# --- zsh for users created later --------------------------------------------
+# --- zsh: oh-my-zsh + duellj config, default for users created later --------
 if [[ -x /bin/zsh ]]; then
     sed -i 's|^SHELL=.*|SHELL=/bin/zsh|' /etc/default/useradd
+
+    if [[ -r /etc/calamares/scripts/qdrnt.zsh ]]; then
+        log "installing qdrnt zsh config"
+        install -Dm644 /etc/calamares/scripts/qdrnt.zsh /usr/local/share/qdrnt/qdrnt.zsh
+        # Plugins picked in the installer. Unexpanded "${gs[...]}" (no selection
+        # stored) means "use the qdrnt defaults" from qdrnt.zsh.
+        zsh_plugins=()
+        if [[ "$zsh_plugins_csv" != *'${'* ]]; then
+            IFS=',' read -r -a picked <<< "$zsh_plugins_csv"
+            for p in "${picked[@]}"; do
+                [[ "$p" =~ ^[A-Za-z0-9_-]+$ ]] && zsh_plugins+=("$p")
+            done
+            plugins_line="plugins=(${zsh_plugins[*]})"
+        else
+            plugins_line="# plugins=(...)   # unset: qdrnt defaults from /usr/local/share/qdrnt/qdrnt.zsh"
+        fi
+        log "zsh plugins: ${zsh_plugins[*]:-<defaults>}"
+        zshrc="# qdrnt: oh-my-zsh (duellj theme). Edit the plugin list, then open a new shell.
+# Available plugins: ls /usr/share/oh-my-zsh/plugins
+${plugins_line}
+
+source /usr/local/share/qdrnt/qdrnt.zsh
+
+# Your own settings below."
+        # New users (/etc/skel/.zshrc belongs to cachyos-zsh-config; a package
+        # update may restore the CachyOS version for users created afterwards).
+        printf '%s\n' "$zshrc" > /etc/skel/.zshrc
+        home="$(getent passwd "$user" | cut -d: -f6)"
+        if [[ -n "$home" && -d "$home" ]]; then
+            printf '%s\n' "$zshrc" > "$home/.zshrc"
+            chown "$user": "$home/.zshrc"
+        fi
+    fi
 fi
 
 exit 0
