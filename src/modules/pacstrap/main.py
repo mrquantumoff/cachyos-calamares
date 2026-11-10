@@ -121,6 +121,17 @@ def run():
     elif bootloader == "systemd-boot":
         base_packages += ["systemd-boot-manager"]
 
+    # qdrnt: the CachyOS-signed Easy Anti-Cheat kernel next to the regular ones.
+    # CachyOS supports it with systemd-boot, Limine and rEFInd on UEFI; the boot
+    # entry is written by the qdrnt-eac script after the bootloader is installed.
+    install_eac = (libcalamares.utils.get_target_platform() != "handheld"
+                   and os.path.isdir("/sys/firmware/efi")
+                   and bootloader in ("systemd-boot", "limine", "refind", "refind-ai"))
+    if install_eac:
+        base_packages += ["linux-cachyos-eac", "systemd-boot-cachyos-signed",
+                          "cachyos-eac-signing-key", "sbctl", "sbsigntools",
+                          "tpm2-tools", "efibootmgr"]
+
     # Detect CPU vendor and add the correct microcode package
     try:
         with open("/proc/cpuinfo") as f:
@@ -140,6 +151,8 @@ def run():
             base_packages += ["linux-cachyos-deckify-zfs"]
         else:
             base_packages += ["linux-cachyos-zfs", "linux-cachyos-lts-zfs"]
+            if install_eac:
+                base_packages += ["linux-cachyos-eac-zfs"]
     elif is_root_on_btrfs:
         libcalamares.utils.debug("Root on BTRFS")
         if bootloader == "limine":

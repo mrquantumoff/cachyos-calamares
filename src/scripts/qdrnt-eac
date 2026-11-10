@@ -1,0 +1,222 @@
+#!/bin/bash
+# qdrnt: Easy Anti-Cheat boot entry. Runs inside the installed system (chroot),
+# after the bootloader module and chwd.
+# Usage: qdrnt-eac <bootloader>   (packagechooser_bootloader: systemd-boot, limine, refind, refind-ai)
+#
+# pacstrap installs linux-cachyos-eac and the CachyOS-signed systemd-boot on
+# UEFI with systemd-boot, Limine or rEFInd (GRUB is not supported by CachyOS's
+# EAC setup). This script
+#   - installs the EAC module packages that match the drivers chwd picked,
+#   - writes the "CachyOS (EAC)" boot entry the way eac-setup does
+#     (https://wiki.cachyos.org/configuration/easy_anti_cheat/),
+#   - makes it the default boot entry when the EAC kernel can run this machine.
+# Secure Boot key enrollment needs the firmware in Setup Mode, so that is left
+# to `sudo eac-setup` on the installed system. eac-setup finds and keeps what
+# this script set up (same entry file, firmware entry label and paths).
+set -u
+
+bootloader="${1:-}"
+
+ESP=/boot
+EAC_REQ="lockdown=integrity lsm=landlock,lockdown,yama,integrity,bpf iommu.passthrough=0 intel_iommu=on module.sig_enforce=1 sysctl.kernel.kexec_load_disabled=1"
+EAC_LABEL="CachyOS EAC"
+EAC_LOADER='\EFI\cachyos-eac\systemd-bootx64.efi'
+SDBOOT_SIGNED=/usr/lib/systemd/boot/efi/systemd-bootx64.efi.signed
+
+log() { echo "[qdrnt-eac] $*"; }
+
+has_pkg() { pacman -Qq "$1" &>/dev/null; }
+
+has_nvidia_gpu() {
+    local dev
+    for dev in /sys/bus/pci/devices/*; do
+        [[ -r "$dev/vendor" && -r "$dev/class" ]] || continue
+        if [[ "$(<"$dev/vendor")" == "0x10de" && "$(<"$dev/class")" == 0x03* ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Reasons the EAC entry is not made the default (empty: it is)
+no_default=()
+
+case "$bootloader" in
+    systemd-boot | limine) ;;
+    refind | refind-ai) bootloader=refind ;;
+    *) log "bootloader '$bootloader' is not supported by EAC, skipping"; exit 0 ;;
+esac
+if ! has_pkg linux-cachyos-eac || [[ ! -d /sys/firmware/efi ]]; then
+    log "no EAC kernel or not UEFI, skipping"
+    exit 0
+fi
+if ! mountpoint -q "$ESP"; then
+    log "$ESP is not the mounted EFI system partition, skipping"
+    exit 0
+fi
+
+# --- Module packages: DKMS modules do not load in the EAC kernel -------------
+installed="$(pacman -Qq)"
+eac_pkgs=()
+if grep -q 'nvidia-580xx' <<< "$installed"; then
+    eac_pkgs+=(linux-cachyos-eac-nvidia-580xx)
+elif grep -q 'nvidia-open' <<< "$installed"; then
+    eac_pkgs+=(linux-cachyos-eac-nvidia-open)
+fi
+if grep -qx 'r8125-dkms' <<< "$installed"; then
+    eac_pkgs+=(linux-cachyos-eac-r8125)
+fi
+if (( ${#eac_pkgs[@]} )); then
+    log "installing ${eac_pkgs[*]}"
+    pacman -S --noconfirm --needed "${eac_pkgs[@]}" || no_default+=("installing ${eac_pkgs[*]} failed")
+fi
+if grep -qx 'zfs-utils' <<< "$installed" && ! has_pkg linux-cachyos-eac-zfs; then
+    no_default+=("root on ZFS without linux-cachyos-eac-zfs")
+fi
+if has_nvidia_gpu && ! pacman -Qq | grep -q '^linux-cachyos-eac-nvidia'; then
+    no_default+=("no EAC build of the installed NVIDIA driver")
+fi
+uncovered="$(pacman -Qq | grep -- '-dkms$' | grep -Evx 'nvidia-open-dkms|nvidia-580xx-dkms|r8125-dkms' | paste -sd' ')"
+if [[ -n "$uncovered" ]]; then
+    no_default+=("DKMS modules without an EAC build: $uncovered")
+fi
+
+# --- Hardware that EAC requires (same checks as eac-setup) -------------------
+if [[ "$(cat /sys/class/tpm/tpm0/tpm_version_major 2>/dev/null)" != 2 ]]; then
+    no_default+=("no TPM 2.0")
+fi
+if [[ ! -e /sys/firmware/acpi/tables/DMAR && ! -e /sys/firmware/acpi/tables/IVRS ]]; then
+    no_default+=("IOMMU disabled in the firmware")
+fi
+
+# --- Kernel command line: the one the bootloader module wrote, plus EAC_REQ ---
+case "$bootloader" in
+    systemd-boot)
+        cmdline="$(cat /etc/kernel/cmdline 2>/dev/null)"
+        ;;
+    limine)
+        # shellcheck disable=SC1091
+        cmdline="$(set +eu; declare -A KERNEL_CMDLINE; . /etc/default/limine >/dev/null 2>&1; echo "${KERNEL_CMDLINE[default]:-}")"
+        ;;
+    refind)
+        cmdline="$(sed -n 's/^"Boot with standard options"[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$ESP/refind_linux.conf" 2>/dev/null | head -n1)"
+        ;;
+esac
+keys=(BOOT_IMAGE initrd)
+for opt in $EAC_REQ; do
+    keys+=("${opt%%=*}")
+done
+opts=()
+for opt in $cmdline; do
+    for key in "${keys[@]}"; do
+        [[ "$opt" == "$key="* ]] && continue 2
+    done
+    opts+=("$opt")
+done
+options="${opts[*]} $EAC_REQ"
+if [[ " $options " != *" root="* ]]; then
+    log "no root= in the kernel command line ('$cmdline'), skipping the EAC entry"
+    exit 0
+fi
+
+# --- The EAC entry, booted by the CachyOS-signed systemd-boot ----------------
+if [[ "$bootloader" == limine ]]; then
+    machine_id="$(cat /etc/machine-id)"
+    kernel="/$machine_id/linux-cachyos-eac/vmlinuz"
+    initrd="/$machine_id/linux-cachyos-eac/initramfs"
+    [[ -f "$ESP$kernel" ]] || limine-update || true
+else
+    kernel=/vmlinuz-linux-cachyos-eac
+    initrd=/initramfs-linux-cachyos-eac.img
+fi
+for f in "$kernel" "$initrd" ; do
+    if [[ ! -f "$ESP$f" ]]; then
+        log "$ESP$f is missing, skipping the EAC entry"
+        exit 0
+    fi
+done
+if [[ ! -f "$SDBOOT_SIGNED" ]]; then
+    log "$SDBOOT_SIGNED is missing (systemd-boot-cachyos-signed), skipping the EAC entry"
+    exit 0
+fi
+
+printf 'title   CachyOS (EAC)\nlinux   %s\ninitrd  %s\noptions %s\n' "$kernel" "$initrd" "$options" \
+    | install -Dm644 /dev/stdin "$ESP/loader/entries/cachyos-eac.conf"
+log "wrote $ESP/loader/entries/cachyos-eac.conf"
+
+# The firmware entry of the separate systemd-boot (Limine and rEFInd)
+eac_bootnum() {
+    efibootmgr 2>/dev/null | grep -iF "$partuuid" | grep -iF "$EAC_LOADER" \
+        | sed -n "s/^Boot\([0-9A-F]\{4\}\)\*\? $EAC_LABEL\t.*/\1/p" | head -n1
+}
+
+if [[ "$bootloader" == systemd-boot ]]; then
+    # Replace the systemd-boot that bootctl installed with the CachyOS-signed one
+    install -Dm644 "$SDBOOT_SIGNED" "$ESP/EFI/systemd/systemd-bootx64.efi"
+    install -Dm644 "$SDBOOT_SIGNED" "$ESP/EFI/BOOT/BOOTX64.EFI"
+    if (( ${#no_default[@]} == 0 )); then
+        sed -i '/^default[[:space:]]/d' "$ESP/loader/loader.conf"
+        sed -i '1i default cachyos-eac.conf' "$ESP/loader/loader.conf"
+    fi
+else
+    # Limine / rEFInd stay installed. The CachyOS-signed systemd-boot gets its
+    # own directory and firmware entry; EAC only passes when booted through it.
+    install -Dm644 "$SDBOOT_SIGNED" "$ESP/EFI/cachyos-eac/systemd-bootx64.efi"
+
+    if [[ "$bootloader" == limine ]]; then
+        main_title="Limine (other kernels, snapshots)"
+        main_efi="$(cd "$ESP" && find EFI -ipath 'EFI/limine/*' -iname 'limine*.efi' | head -n1)"
+        [[ -n "$main_efi" ]] || main_efi=EFI/BOOT/BOOTX64.EFI
+    else
+        main_title="rEFInd (other kernels)"
+        main_efi=EFI/refind/refind_x64.efi
+        refind_conf="$ESP/EFI/refind/refind.conf"
+        if [[ -f "$refind_conf" ]]; then
+            # Anything started from the rEFInd menu does not pass the EAC checks
+            grep -q '^dont_scan_files.*vmlinuz-linux-cachyos-eac' "$refind_conf" \
+                || printf '\n# Easy Anti-Cheat: boot this only through the "%s" firmware entry\ndont_scan_files +,vmlinuz-linux-cachyos-eac\n' "$EAC_LABEL" >> "$refind_conf"
+            grep -q '^dont_scan_dirs.*EFI/cachyos-eac' "$refind_conf" \
+                || printf '\n# Easy Anti-Cheat: boot this only through the "%s" firmware entry\ndont_scan_dirs +,EFI/cachyos-eac\n' "$EAC_LABEL" >> "$refind_conf"
+        fi
+    fi
+
+    if (( ${#no_default[@]} == 0 )); then
+        # Default boot: a short menu so the usual boot manager stays reachable
+        printf 'title   %s\nefi     /%s\n' "$main_title" "$main_efi" \
+            | install -Dm644 /dev/stdin "$ESP/loader/entries/zz-qdrnt-$bootloader.conf"
+        printf 'default cachyos-eac.conf\ntimeout 3\n' | install -Dm644 /dev/stdin "$ESP/loader/loader.conf"
+    else
+        # Only started on request (eac-setup boot / firmware boot menu)
+        printf 'default cachyos-eac.conf\ntimeout 0\n' | install -Dm644 /dev/stdin "$ESP/loader/loader.conf"
+    fi
+
+    dev="$(findmnt -no SOURCE "$ESP")"
+    partuuid="$(blkid -s PARTUUID -o value "$dev")"
+    num="$(eac_bootnum)"
+    if [[ -z "$num" ]]; then
+        name="$(basename "$dev")"
+        disk="/dev/$(basename "$(readlink -f "/sys/class/block/$name/..")")"
+        part="$(cat "/sys/class/block/$name/partition")"
+        create=(--create-only)
+        (( ${#no_default[@]} == 0 )) && create=(--create)
+        efibootmgr --quiet "${create[@]}" --disk "$disk" --part "$part" \
+            --label "$EAC_LABEL" --loader "$EAC_LOADER" || log "efibootmgr failed"
+        num="$(eac_bootnum)"
+    elif (( ${#no_default[@]} == 0 )); then
+        order="$(efibootmgr | sed -n 's/^BootOrder: //p' | tr ',' '\n' | grep -vx "$num" | paste -sd,)"
+        efibootmgr --quiet --bootorder "$num${order:+,$order}" || log "efibootmgr --bootorder failed"
+    fi
+    if [[ -n "$num" ]]; then
+        log "firmware boot entry: Boot$num $EAC_LABEL"
+    else
+        log "could not create the '$EAC_LABEL' firmware boot entry, eac-setup will retry"
+        no_default+=("no firmware boot entry")
+    fi
+fi
+
+if (( ${#no_default[@]} == 0 )); then
+    log "CachyOS (EAC) is the default boot entry"
+else
+    log "CachyOS (EAC) entry added, not the default: ${no_default[*]}"
+fi
+exit 0
